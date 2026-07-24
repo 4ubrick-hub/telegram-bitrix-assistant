@@ -1,15 +1,16 @@
 """
-Парсер документации Bitrix24 API.
-Извлекает структурированную информацию из HTML-контента.
+Парсер документации Bitrix24 (Diplodoc).
+
+Извлекает информацию не из HTML-тегов, а из объекта
+window.__DATA__, в котором хранится вся документация.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
-from typing import Optional
-
-from bs4 import BeautifulSoup
+from typing import Any
 
 from app.core.exceptions import ParserError
 
@@ -18,189 +19,295 @@ logger = logging.getLogger(__name__)
 
 class DocumentParser:
     """
-    Парсер для извлечения информации из HTML документации Bitrix24.
+    Парсер документации Bitrix24.
+
+    Поддерживает новую документацию,
+    построенную на Diplodoc.
     """
 
     def __init__(self):
-        """Инициализирует парсер."""
-        logger.info("DocumentParser инициализирован")
+        logger.info("DocumentParser initialized")
 
-    def parse_page(self, html_content: str, url: str) -> dict:
-        """
-        Парсит HTML страницу и извлекает структурированные данные.
+    def parse_page(
+        self,
+        html_content: str,
+        url: str,
+    ) -> dict:
 
-        Args:
-            html_content: HTML содержимое страницы.
-            url: URL исходной страницы.
-
-        Returns:
-            Словарь с извлеченной информацией.
-
-        Raises:
-            ParserError: При ошибке парсинга.
-        """
         try:
-            soup = BeautifulSoup(html_content, "html.parser")
 
-            # Извлекаем основную информацию
-            title = self._extract_title(soup)
-            description = self._extract_description(soup)
-            sections = self._extract_sections(soup)
-            code_examples = self._extract_code_examples(soup)
-            parameters = self._extract_parameters(soup)
+            data = self._extract_data(html_content)
 
-            document = {
+            title = (
+                data.get("title")
+                or data.get("meta", {}).get("title")
+                or url
+            )
+
+            content = self._collect_text(data)
+
+            return {
                 "url": url,
                 "title": title,
-                "description": description,
-                "sections": sections,
-                "parameters": parameters,
-                "code_examples": code_examples,
-                "content": html_content[:1000],  # Первые 1000 символов
+                "description": "",
+                "sections": [],
+                "parameters": [],
+                "code_examples": [],
+                "content": content,
             }
-
-            logger.info(f"Страница успешно спарсена: {title}")
-            return document
 
         except Exception as e:
-            logger.exception(f"Ошибка парсинга страницы {url}: {e}")
-            raise ParserError(f"Не удалось спарсить страницу: {e}") from e
+            logger.exception("Ошибка парсинга %s", url)
+            raise ParserError(str(e)) from e
 
-    def _extract_title(self, soup: BeautifulSoup) -> str:
-        """Извлекает заголовок страницы."""
-        title_tag = soup.find("h1") or soup.find("title")
+    def parse_batch(
+        self,
+        pages: dict[str, str],
+    ) -> list[dict]:
 
-        if title_tag:
-            return title_tag.get_text(strip=True)
-
-        return "Без названия"
-
-    def _extract_description(self, soup: BeautifulSoup) -> str:
-        """Извлекает описание (мета-tag или первый абзац)."""
-        meta_desc = soup.find("meta", attrs={"name": "description"})
-
-        if meta_desc and meta_desc.get("content"):
-            return meta_desc.get("content")
-
-        paragraph = soup.find("p")
-
-        if paragraph:
-            return paragraph.get_text(strip=True)[:500]
-
-        return ""
-
-    def _extract_sections(self, soup: BeautifulSoup) -> list[dict]:
-        """Извлекает разделы (headings и их содержимое)."""
-        sections = []
-        current_section = None
-
-        for element in soup.find_all(["h2", "h3", "p", "ul", "ol"]):
-            if element.name in ["h2", "h3"]:
-                if current_section:
-                    sections.append(current_section)
-
-                current_section = {
-                    "level": element.name,
-                    "title": element.get_text(strip=True),
-                    "content": [],
-                }
-
-            elif current_section and element.name in ["p", "ul", "ol"]:
-                current_section["content"].append(element.get_text(strip=True))
-
-        if current_section:
-            sections.append(current_section)
-
-        return sections
-
-    def _extract_parameters(self, soup: BeautifulSoup) -> list[dict]:
-        """Извлекает параметры API методов."""
-        parameters = []
-
-        # Ищем таблицы с параметрами
-        tables = soup.find_all("table")
-
-        for table in tables:
-            rows = table.find_all("tr")
-
-            if len(rows) < 2:
-                continue
-
-            # Первая строка - заголовки
-            headers = [th.get_text(strip=True) for th in rows[0].find_all(["th", "td"])]
-
-            # Проверяем, является ли это таблицей параметров
-            if not any(
-                keyword in header.lower()
-                for header in headers
-                for keyword in ["параметр", "parameter", "name", "тип", "type"]
-            ):
-                continue
-
-            # Обрабатываем строки данных
-            for row in rows[1:]:
-                cols = row.find_all("td")
-
-                if len(cols) >= 2:
-                    param = {
-                        "name": cols[0].get_text(strip=True),
-                        "type": cols[1].get_text(strip=True) if len(cols) > 1 else "",
-                        "description": cols[2].get_text(strip=True) if len(cols) > 2 else "",
-                    }
-
-                    parameters.append(param)
-
-        return parameters
-
-    def _extract_code_examples(self, soup: BeautifulSoup) -> list[dict]:
-        """Извлекает примеры кода."""
-        examples = []
-
-        # Ищем блоки кода
-        code_blocks = soup.find_all("pre")
-
-        for idx, block in enumerate(code_blocks):
-            code = block.get_text(strip=True)
-
-            # Определяем язык кода
-            language = "unknown"
-
-            if "<?php" in code:
-                language = "php"
-            elif "#!/bin/bash" in code or "curl" in code:
-                language = "bash"
-            elif "{" in code and "[" in code:
-                language = "json"
-
-            example = {
-                "index": idx,
-                "language": language,
-                "code": code[:500],  # Первые 500 символов
-            }
-
-            examples.append(example)
-
-        return examples
-
-    def parse_batch(self, pages: dict[str, str]) -> list[dict]:
-        """
-        Парсит батч страниц.
-
-        Args:
-            pages: Словарь {url: html_content}.
-
-        Returns:
-            Список распарсенных документов.
-        """
         documents = []
 
-        for url, html_content in pages.items():
+        for url, html in pages.items():
+
             try:
-                document = self.parse_page(html_content, url)
-                documents.append(document)
-            except ParserError as e:
-                logger.warning(f"Пропуск документа {url}: {e}")
+                documents.append(
+                    self.parse_page(html, url)
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "Не удалось обработать %s: %s",
+                    url,
+                    e,
+                )
+
+        logger.info(
+            "Обработано %d документов",
+            len(documents),
+        )
+
+        return documents
+
+    # ---------------------------------------------------------
+    # Diplodoc
+    # ---------------------------------------------------------
+
+    def _extract_data(
+        self,
+        html: str,
+    ) -> dict[str, Any]:
+        """
+        Извлекает объект window.__DATA__
+        из HTML страницы.
+        """
+
+        patterns = [
+
+            r"window\.__DATA__\s*=\s*(\{.*?\})\s*;</script>",
+
+            r"window\.__DATA__\s*=\s*JSON\.parse\(\s*'(.+?)'\s*\)",
+
+            r'window\.__DATA__\s*=\s*JSON\.parse\(\s*"(.+?)"\s*\)',
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                html,
+                re.DOTALL,
+            )
+
+            if not match:
                 continue
 
-        logger.info(f"Батч успешно спарсен: {len(documents)} документов")
-        return documents
+            raw = match.group(1)
+
+            try:
+
+                if raw.startswith("{"):
+
+                    return json.loads(raw)
+
+                decoded = bytes(
+                    raw,
+                    "utf-8",
+                ).decode("unicode_escape")
+
+                return json.loads(decoded)
+
+            except Exception:
+                continue
+
+        raise ParserError(
+            "Не найден window.__DATA__"
+        )
+
+    # ---------------------------------------------------------
+    # Извлечение текста из JSON
+    # ---------------------------------------------------------
+
+    def _collect_text(
+        self,
+        obj: Any,
+    ) -> str:
+        """
+        Собирает весь текст из объекта Diplodoc.
+        """
+
+        result: list[str] = []
+
+        self._walk(obj, result)
+
+        # удаляем дубликаты,
+        # сохраняя порядок
+
+        unique = []
+
+        seen = set()
+
+        for line in result:
+
+            line = self._normalize(line)
+
+            if not line:
+                continue
+
+            if line in seen:
+                continue
+
+            seen.add(line)
+            unique.append(line)
+
+        return "\n".join(unique)
+
+    def _walk(
+        self,
+        obj: Any,
+        result: list[str],
+    ) -> None:
+
+        if obj is None:
+            return
+
+        if isinstance(obj, str):
+
+            text = self._normalize(obj)
+
+            if text:
+                result.append(text)
+
+            return
+
+        if isinstance(obj, list):
+
+            for item in obj:
+                self._walk(item, result)
+
+            return
+
+        if not isinstance(obj, dict):
+            return
+
+        if "mdast" in obj:
+            self._extract_markdown_ast(
+                obj["mdast"],
+                result,
+            )
+
+        for value in obj.values():
+            self._walk(value, result)
+
+    def _normalize(
+        self,
+        text: str,
+    ) -> str:
+        """
+        Нормализует текст.
+        """
+
+        if not text:
+            return ""
+
+        text = text.replace("\xa0", " ")
+
+        text = re.sub(
+            r"<[^>]+>",
+            " ",
+            text,
+        )
+
+        text = text.replace("&nbsp;", " ")
+        text = text.replace("&lt;", "<")
+        text = text.replace("&gt;", ">")
+        text = text.replace("&amp;", "&")
+
+        text = re.sub(
+            r"\s+",
+            " ",
+            text,
+        )
+
+        return text.strip()
+
+    # ---------------------------------------------------------
+    # Diplodoc Markdown AST
+    # ---------------------------------------------------------
+
+    def _extract_data(
+        self,
+        html: str,
+    ) -> dict[str, Any]:
+        """
+        Извлекает JSON документации Bitrix24.
+
+        Поддерживает несколько вариантов,
+        используемых Diplodoc.
+        """
+
+        patterns = [
+
+            r"window\.__DATA__\s*=\s*(\{.*?\})\s*;</script>",
+
+            r"window\.__DATA__\s*=\s*JSON\.parse\(\s*'(.*?)'\s*\)",
+
+            r'window\.__DATA__\s*=\s*JSON\.parse\(\s*"(.*?)"\s*\)',
+
+            r"window\.__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*;</script>",
+
+            r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
+        ]
+
+        for pattern in patterns:
+
+            match = re.search(
+                pattern,
+                html,
+                re.DOTALL,
+            )
+
+            if not match:
+                continue
+
+            raw = match.group(1)
+
+            try:
+
+                raw = raw.strip()
+
+                if raw.startswith("{"):
+                    return json.loads(raw)
+
+                raw = bytes(
+                    raw,
+                    "utf-8",
+                ).decode("unicode_escape")
+
+                return json.loads(raw)
+
+            except Exception:
+                continue
+
+        raise ParserError(
+            "Не удалось найти JSON документации."
+        )

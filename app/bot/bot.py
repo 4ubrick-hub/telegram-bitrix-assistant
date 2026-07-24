@@ -42,37 +42,47 @@ def create_application() -> Application:
 class TelegramBot:
     """
     Обёртка над Telegram Application для управления ботом.
-    Инкапсулирует логику запуска и остановки бота.
     """
 
     def __init__(self):
         """Инициализирует Telegram бота и сервисы."""
         self.app = create_application()
-        
-        # 🆕 Инициализируем сервисы
+
         self.assistant_service = AssistantService()
         self.user_service = UserService()
-        
-        # 🆕 Передаём сервисы в контекст приложения
-        self.app.bot_data['assistant_service'] = self.assistant_service
-        self.app.bot_data['user_service'] = self.user_service
-        
+
+        self.app.bot_data["assistant_service"] = self.assistant_service
+        self.app.bot_data["user_service"] = self.user_service
+
         logger.info("TelegramBot инициализирован со всеми сервисами")
 
     async def start(self) -> None:
         """
-        Запускает бота в режиме polling.
-        
-        Blocking operation - блокирует event loop до остановки.
+        Запускает Telegram-бота в асинхронном режиме.
         """
         logger.info("🚀 Запуск Telegram бота (polling mode)...")
-        self.app.run_polling()
+
+        await self.app.initialize()
+        await self.app.start()
+        await self.app.updater.start_polling()
+
+        logger.info("✅ Telegram бот успешно запущен")
+
+        import asyncio
+        await asyncio.Event().wait()
 
     async def stop(self) -> None:
         """
-        Останавливает бота корректно.
-        
-        Приостанавливает обработку сообщений и закрывает соединения.
+        Корректно останавливает Telegram-бота.
         """
         logger.info("🛑 Остановка Telegram бота...")
+
+        if self.app.updater.running:
+            await self.app.updater.stop()
+
+        if self.app.running:
+            await self.app.stop()
+
         await self.app.shutdown()
+
+        logger.info("✅ Telegram бот остановлен")
